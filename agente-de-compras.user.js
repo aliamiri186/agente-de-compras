@@ -1,0 +1,368 @@
+// ==UserScript==
+// @name         Varejo Fácil - Agente de Compras
+// @namespace    emporiodoreal
+// @version      4.9
+// @description  Sugestão de compra cruzando entradas x vendas + validação de licença (Supabase)
+// @match        https://emporiodoreal.varejofacil.com/app/*
+// @grant        GM_xmlhttpRequest
+// @connect      emporiodoreal.varejofacil.com
+// @connect      pjmyejohyzcfhawspceq.supabase.co
+// @require      https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js
+// @updateURL    https://raw.githubusercontent.com/aliamiri186/agente-de-compras/main/agente-de-compras.user.js
+// @downloadURL  https://raw.githubusercontent.com/aliamiri186/agente-de-compras/main/agente-de-compras.user.js
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  /* ===================== CONFIG LICENÇA (Supabase) ===================== */
+  const SUPABASE_URL = "https://pjmyejohyzcfhawspceq.supabase.co";
+  const VALIDAR_LICENCA_URL = SUPABASE_URL + "/functions/v1/validar-licenca";
+  const LICENCA_CACHE_HORAS = 12;
+
+  async function validarLicenca(chave) {
+    if (!chave) return { ok: false, motivo: "Chave não informada" };
+    try {
+      const c = JSON.parse(localStorage.getItem("agente_licenca_cache") || "null");
+      if (c && c.chave === chave && c.ok &&
+          (Date.now() - c.ts) < LICENCA_CACHE_HORAS * 3600 * 1000) {
+        return { ok: true, cache: true };
+      }
+    } catch (e) {}
+    try {
+      const resp = await fetch(VALIDAR_LICENCA_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chave: chave })
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (resp.ok && data.ok) {
+        localStorage.setItem("agente_licenca_cache",
+          JSON.stringify({ chave, ok: true, ts: Date.now() }));
+        return { ok: true, ...data };
+      }
+      return { ok: false, motivo: data.motivo || ("HTTP " + resp.status) };
+    } catch (err) {
+      return { ok: false, motivo: "Falha de conexão: " + err.message };
+    }
+  }
+
+  function obterChaveLicenca() {
+    let chave = localStorage.getItem("agente_chave_licenca");
+    if (!chave) {
+      chave = prompt("Digite sua chave de licença do Agente de Compras:");
+      if (chave) localStorage.setItem("agente_chave_licenca", chave.trim());
+    }
+    return chave ? chave.trim() : null;
+  }
+  /* =================================================================== */
+
+  const POOL = 8;
+  const DIAS_GIRO = 120;
+  const DIAS_CORTE_ENTRADA = 365;
+  const JANELA_VENDAS = 400;
+
+  function apiGet(url) {
+    return new Promise((resolve, reject) => {
+      GM_xmlhttpRequest({
+        method: 'GET',
+        url: location.origin + url,
+        headers: { 'Accept': 'application/json' },
+        timeout: 60000,
+        onload: r => {
+          if (r.status >= 200 && r.status < 300) {
+            try { resolve(JSON.parse(r.responseText)); }
+            catch (e) { reject('JSON inválido: ' + e); }
+          } else reject(r.status + ' ' + r.responseText.slice(0, 120));
+        },
+        onerror: () => reject('erro de rede'),
+        ontimeout: () => reject('timeout')
+      });
+    });
+  }
+
+  function mdc(a, b) { return b ? mdc(b, a % b) : a; }
+  function mdcLista(arr) {
+    const ns = arr.map(n => Math.round(n)).filter(n => n > 0);
+    if (!ns.length) return 1;
+    return ns.reduce((g, n) => mdc(g, n)) || 1;
+  }
+  function diasDesde(dataStr) {
+    if (!dataStr) return Infinity;
+    return Math.floor((Date.now() - new Date(dataStr).getTime()) / 86400000);
+  }
+  function setBtn(txt) {
+    const b = document.getElementById('vf-agente-btn');
+    if (b) b.textContent = txt;
+  }
+  function idValido(v) { const n = Number(String(v).trim()); return Number.isInteger(n) && n > 0; }
+  function normId(v) { return Number(String(v).trim()); }
+
+  async function emLotes(itens, fn, pool, rotulo) {
+    const res = [];
+    for (let i = 0; i < itens.length; i += pool) {
+      const r = await Promise.all(itens.slice(i, i + pool).map(fn));
+      res.push(...r);
+      if (rotulo) setBtn('⏳ ' + rotulo + ' ' + Math.min(i + pool, itens.length) + '/' + itens.length);
+    }
+    return res;
+  }
+
+  async function coletarEntradas(fornecedorId, lojaFiltro) {
+    let start = 0, todas = [];
+    while (true) {
+      const q = `fornecedorId==${fornecedorId};${lojaFiltro};tipoDeOperacao==ENTRADA`;
+      const pg = await apiGet(`/api/v1/compra/notas-fiscais?q=${q}&sort=-dataEmissao&count=50&start=${start}`);
+      const items = pg.items || [];
+      todas = todas.concat(items);
+      if (items.length < 50) break;
+      start += 50;
+      setBtn('⏳ Buscando notas ' + todas.length + '...');
+    }
+    return todas;
+  }
+
+  async function rodarAgente(fornecedorId, lojaFiltro) {
+    setBtn('⏳ Buscando notas...');
+    const notas = await coletarEntradas(fornecedorId, lojaFiltro);
+    if (!notas.length) { alert('Nenhuma nota de entrada encontrada.'); return null; }
+
+    const prod = {};
+    notas.forEach(nota => {
+      const dataEmis = nota.dataEmissao;
+      (nota.itens || []).forEach(it => {
+        const pid = it.produtoId;
+        if (!prod[pid]) prod[pid] = { totalEntrada: 0, qtds: [], ultEnt: null, qtdUltEnt: 0 };
+        const q = it.quantidade || 0;
+        prod[pid].totalEntrada += q;
+        prod[pid].qtds.push(q);
+        if (!prod[pid].ultEnt || new Date(dataEmis) > new Date(prod[pid].ultEnt)) {
+          prod[pid].ultEnt = dataEmis;
+          prod[pid].qtdUltEnt = q;
+        }
+      });
+    });
+
+    const limiteEntrada = Date.now() - DIAS_CORTE_ENTRADA * 86400000;
+    let ids = Object.keys(prod)
+      .filter(idValido)
+      .map(normId)
+      .filter(pid => {
+        const ue = prod[pid] && prod[pid].ultEnt;
+        return ue && new Date(ue).getTime() >= limiteEntrada;
+      });
+    if (!ids.length) { alert('Nenhum produto válido com entrada nos últimos 12 meses.'); return null; }
+
+    setBtn('⏳ Descrições...');
+    const descMap = {};
+    for (let i = 0; i < ids.length; i += 90) {
+      const chunk = ids.slice(i, i + 90);
+      try {
+        const arr = await apiGet('/api/v1/produto/produtos?q=id=in=(' + chunk.join(',') + ')&count=200');
+        (arr.items || arr).forEach(p => {
+          descMap[String(p.id)] = (p.descricao || p.descricaoReduzida || ('Produto ' + p.id)).trim();
+        });
+      } catch (e) {}
+    }
+    const nomeProduto = pid => descMap[String(pid)] || ('SEM CADASTRO (' + pid + ')');
+
+    setBtn('⏳ Estoque...');
+    const saldoMap = {};
+    for (let i = 0; i < ids.length; i += 60) {
+      const chunk = ids.slice(i, i + 60);
+      try {
+        const r = await apiGet(`/api/v1/estoque/saldos?q=produtoId=in=(${chunk.join(',')});${lojaFiltro}&count=1000`);
+        (r.items || []).forEach(x => { saldoMap[x.produtoId] = (saldoMap[x.produtoId] || 0) + (x.saldo || 0); });
+      } catch (e) {}
+    }
+
+    const dJanela = new Date(Date.now() - JANELA_VENDAS * 86400000).toISOString().slice(0, 10);
+    const dt4m = new Date(Date.now() - DIAS_GIRO * 86400000).toISOString().slice(0, 10);
+
+    const linhas = await emLotes(ids, async (pid) => {
+      const p = prod[pid];
+      const caixa = Math.max(1, mdcLista(p.qtds));
+      let vHist = 0, v4 = 0, truncado = false;
+      try {
+        const pg = await apiGet(`/api/v1/venda/cupons-fiscais?q=itensVenda.produtoId==${pid};${lojaFiltro};data=ge=${dJanela}&count=500`);
+        (pg.items || []).forEach(c => {
+          const d = c.data;
+          (c.itensVenda || []).forEach(iv => {
+            if (iv.produtoId === pid) {
+              const q = iv.quantidadeVenda || 0;
+              vHist += q;
+              if (d && d >= dt4m) v4 += q;
+            }
+          });
+        });
+        truncado = (pg.total > 500);
+      } catch (e) {}
+
+      const saldoSys = saldoMap[pid] != null ? saldoMap[pid] : '';
+      const estEstimado = truncado ? null : (p.totalEntrada - vHist);
+      const vDia = v4 / DIAS_GIRO;
+
+      let classe, alvo;
+      if (v4 === 0) { classe = 'Parado'; alvo = 0; }
+      else if (vDia >= 1) { classe = 'Alto giro'; alvo = 45; }
+      else if (vDia >= 0.3) { classe = 'Giro médio'; alvo = 60; }
+      else { classe = 'Giro baixo'; alvo = 90; }
+
+      let caixas = 0, sugUnid = 0;
+      if (v4 > 0) {
+        caixas = Math.max(1, Math.ceil((vDia * alvo) / caixa));
+        sugUnid = caixas * caixa;
+      }
+
+      let semaforo;
+      if (estEstimado != null && vDia > 0) {
+        const cob = estEstimado / vDia;
+        if (cob <= 15) semaforo = '🔴';
+        else if (cob <= 40) semaforo = '🟡';
+        else semaforo = '🟢';
+      } else {
+        const idade = diasDesde(p.ultEnt);
+        semaforo = idade > 180 ? '🔴' : (idade > 90 ? '🟡' : '🟢');
+      }
+
+      const alertas = [];
+      const idadeEnt = diasDesde(p.ultEnt);
+      if (idadeEnt > 180) alertas.push('🔴 sem entrada >6m');
+      if (v4 === 0) alertas.push('🟠 parado (sem venda 4m)');
+      if (estEstimado != null && estEstimado < 0) alertas.push('⚠️ estimado negativo');
+      if (truncado) alertas.push('⏳ estimativa indisponível (giro alto)');
+
+      let pctVend = '';
+      if (p.totalEntrada > 0) {
+        const pct = (vHist / p.totalEntrada) * 100;
+        pctVend = pct >= 100 ? '100% (Esgotou)' : Math.round(pct) + '%';
+      }
+
+      return {
+        _urg: semaforo === '🔴' ? 0 : (semaforo === '🟡' ? 1 : 2),
+        _v4: v4,
+        linha: {
+          'Sinal': semaforo,
+          'Produto': nomeProduto(pid),
+          'Classe de giro': classe,
+          'Caixa (un)': caixa,
+          'Sugestão (cx)': caixas || '',
+          'Sugestão (un)': sugUnid || '',
+          'Estoque Estimado (fluxo 13m)': estEstimado != null ? estEstimado : 's/ estimativa',
+          'Estoque Real (sistema)': saldoSys,
+          'Total Comprado (hist.)': p.totalEntrada,
+          'Vendido (13m)': vHist,
+          'Vendido (4m)': v4,
+          '% Vendido': pctVend,
+          'Últ. entrada': p.ultEnt ? p.ultEnt.slice(0, 10) : '',
+          'Qtd últ. entrada': p.qtdUltEnt,
+          'Alertas': alertas.join(' | '),
+          'Cód. Barras': String(pid)
+        }
+      };
+    }, POOL, 'Calculando');
+
+    linhas.sort((a, b) => a._urg - b._urg || b._v4 - a._v4);
+    return linhas.map(l => l.linha);
+  }
+
+  function exportarExcel(linhas, nomeArq) {
+    const ws = XLSX.utils.json_to_sheet(linhas);
+    const range = XLSX.utils.decode_range(ws['!ref']);
+    let colBarras = -1;
+    for (let C = range.s.c; C <= range.e.c; C++) {
+      const cell = ws[XLSX.utils.encode_cell({ r: 0, c: C })];
+      if (cell && cell.v === 'Cód. Barras') { colBarras = C; break; }
+    }
+    if (colBarras >= 0) {
+      for (let R = range.s.r + 1; R <= range.e.r; R++) {
+        const ref = XLSX.utils.encode_cell({ r: R, c: colBarras });
+        const cell = ws[ref];
+        if (cell && cell.v != null && cell.v !== '') {
+          cell.t = 's';
+          cell.v = String(cell.v);
+          cell.z = '@';
+          delete cell.w;
+        }
+      }
+    }
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Sugestão de Compra');
+    XLSX.writeFile(wb, nomeArq);
+  }
+
+  function criarBotao() {
+    if (document.getElementById('vf-agente-btn')) return;
+    const btn = document.createElement('button');
+    btn.id = 'vf-agente-btn';
+    btn.textContent = '🛒 Agente de Compras';
+    Object.assign(btn.style, {
+      position: 'fixed', bottom: '74px', right: '24px', zIndex: 99999,
+      background: '#2e7d32', color: '#fff', border: 'none', borderRadius: '6px',
+      padding: '12px 16px', fontWeight: 'bold', cursor: 'pointer',
+      boxShadow: '0 2px 8px rgba(0,0,0,.3)'
+    });
+    btn.onclick = abrirDialogo;
+    document.body.appendChild(btn);
+  }
+
+  async function abrirDialogo() {
+    setBtn('⏳ Validando licença...');
+    const chave = obterChaveLicenca();
+    const lic = await validarLicenca(chave);
+    setBtn('🛒 Agente de Compras');
+    if (!lic.ok) {
+      localStorage.removeItem("agente_licenca_cache");
+      alert("Licença inválida ou expirada.\nMotivo: " + (lic.motivo || "desconhecido") +
+            "\n\nPara comprar/renovar, acesse a página do produto na Hotmart.");
+      return;
+    }
+
+    const nome = prompt('Nome do fornecedor:');
+    if (!nome) return;
+    let forn;
+    try {
+      const termo = nome.trim().toUpperCase();
+      const res = await apiGet('/api/v1/pessoa/fornecedores?q=nome==*' + encodeURIComponent(termo) + '*&count=10');
+      const arr = res.items || [];
+      if (!arr.length) { alert('Fornecedor não encontrado.'); return; }
+      if (arr.length > 1) {
+        const opcoes = arr.map((f, i) => (i + 1) + ') ' + f.nome).join('\n');
+        const esc = prompt('Vários fornecedores encontrados:\n' + opcoes + '\n\nDigite o número:', '1');
+        const ix = parseInt(esc, 10) - 1;
+        if (isNaN(ix) || !arr[ix]) { alert('Opção inválida.'); return; }
+        forn = arr[ix];
+      } else { forn = arr[0]; }
+    } catch (e) { alert('Erro ao buscar fornecedor: ' + e); return; }
+
+    const opcLoja = prompt(
+      'Loja:\n1 = Empório do Real\n5 = Um Mundo de Variedades\nA = Ambas (consolidado)\n\nDigite 1, 5 ou A:',
+      'A'
+    );
+    if (!opcLoja) return;
+    let lojaFiltro, sufixo;
+    const o = opcLoja.trim().toUpperCase();
+    if (o === 'A') { lojaFiltro = 'lojaId=in=(1,5)'; sufixo = 'Ambas'; }
+    else if (o === '1') { lojaFiltro = 'lojaId==1'; sufixo = 'Emporio'; }
+    else if (o === '5') { lojaFiltro = 'lojaId==5'; sufixo = 'UmMundo'; }
+    else { alert('Opção inválida.'); return; }
+
+    const btn = document.getElementById('vf-agente-btn');
+    btn.disabled = true;
+    try {
+      const linhas = await rodarAgente(forn.id, lojaFiltro);
+      if (linhas && linhas.length) {
+        exportarExcel(linhas, `AgenteCompras_${(forn.nome || nome).replace(/W+/g, '')}_${sufixo}.xlsx`);
+      }
+    } catch (e) {
+      alert('Erro ao rodar o agente: ' + e);
+    } finally {
+      setBtn('🛒 Agente de Compras');
+      btn.disabled = false;
+    }
+  }
+
+  const obs = new MutationObserver(() => criarBotao());
+  obs.observe(document.body, { childList: true, subtree: true });
+  criarBotao();
+})();

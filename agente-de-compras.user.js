@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Varejo Fácil - Agente de Compras
 // @namespace    emporiodoreal
-// @version      4.9
+// @version      5.0
 // @description  Sugestão de compra cruzando entradas x vendas + validação de licença (Supabase)
 // @match        https://emporiodoreal.varejofacil.com/app/*
 // @grant        GM_xmlhttpRequest
@@ -15,49 +15,81 @@
 (function () {
   'use strict';
 
-  /* ===================== CONFIG LICENÇA (Supabase) ===================== */
-  const SUPABASE_URL = "https://pjmyejohyzcfhawspceq.supabase.co";
-  const VALIDAR_LICENCA_URL = SUPABASE_URL + "/functions/v1/validar-licenca";
-  const LICENCA_CACHE_HORAS = 12;
+  // ===== Licenca por E-MAIL + Trial 7 dias (v5.0) =====
+  var AGENTE_EMAIL_KEY = 'agente_email_licenca';
+  var AGENTE_CACHE_KEY = 'agente_licenca_cache';
+  var VALIDAR_URL = "https://pjmyejohyzcfhawspceq.supabase.co/functions/v1/validar-licenca";
 
-  async function validarLicenca(chave) {
-    if (!chave) return { ok: false, motivo: "Chave não informada" };
-    try {
-      const c = JSON.parse(localStorage.getItem("agente_licenca_cache") || "null");
-      if (c && c.chave === chave && c.ok &&
-          (Date.now() - c.ts) < LICENCA_CACHE_HORAS * 3600 * 1000) {
-        return { ok: true, cache: true };
-      }
-    } catch (e) {}
-    try {
-      const resp = await fetch(VALIDAR_LICENCA_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ chave: chave })
+  function obterEmail() {
+    var salvo = '';
+    try { salvo = (localStorage.getItem(AGENTE_EMAIL_KEY) || '').trim(); } catch (e) {}
+    if (salvo) return salvo;
+    var email = prompt('Agente de Compras\n\nDigite seu e-mail para ativar o agente.\nVoce ganha 7 dias GRATIS, sem cartao.');
+    if (email) {
+      email = email.trim().toLowerCase();
+      try { localStorage.setItem(AGENTE_EMAIL_KEY, email); } catch (e) {}
+    }
+    return email;
+  }
+
+  function validarLicenca(email) {
+    return new Promise(function (resolve) {
+      try {
+        var c = JSON.parse(localStorage.getItem(AGENTE_CACHE_KEY) || 'null');
+        if (c && c.email === email && c.exp > Date.now()) { resolve(c.data); return; }
+      } catch (e) {}
+      GM_xmlhttpRequest({
+        method: 'POST',
+        url: VALIDAR_URL,
+        headers: { 'Content-Type': 'application/json' },
+        data: JSON.stringify({ email: email }),
+        onload: function (r) {
+          var data;
+          try { data = JSON.parse(r.responseText); } catch (e) { data = { ok: false, motivo: 'resposta_invalida' }; }
+          try {
+            if (data && data.ok) {
+              localStorage.setItem(AGENTE_CACHE_KEY, JSON.stringify({ email: email, data: data, exp: Date.now() + 12 * 3600 * 1000 }));
+            }
+          } catch (e) {}
+          resolve(data);
+        },
+        onerror: function () { resolve({ ok: false, motivo: 'erro_conexao' }); }
       });
-      const data = await resp.json().catch(() => ({}));
-      if (resp.ok && data.ok) {
-        localStorage.setItem("agente_licenca_cache",
-          JSON.stringify({ chave, ok: true, ts: Date.now() }));
-        return { ok: true, ...data };
+    });
+  }
+
+  function mensagemBloqueio(lic) {
+    var m = (lic && lic.motivo) || '';
+    if (m === 'trial_expirado') {
+      return 'Seu periodo de teste GRATIS de 7 dias terminou.\n\nPara continuar usando o Agente de Compras, assine na pagina do produto na Hotmart.';
+    }
+    if (m === 'expirada') {
+      return 'Sua assinatura expirou.\n\nRenove na pagina do produto na Hotmart para continuar usando.';
+    }
+    if (m === 'email_invalido') {
+      return 'E-mail invalido. Limpe e tente novamente com um e-mail valido.';
+    }
+    if (m === 'erro_conexao') {
+      return 'Nao foi possivel conectar ao servidor de licenca. Verifique sua internet e tente de novo.';
+    }
+    return 'Licenca invalida. Acesse a pagina do produto na Hotmart para assinar.';
+  }
+
+  function checarAcesso() {
+    var email = obterEmail();
+    if (!email) { alert('E-mail nao informado. O agente nao sera executado.'); return Promise.resolve(false); }
+    return validarLicenca(email).then(function (lic) {
+      if (lic && lic.ok) {
+        if (lic.status === 'trial' && lic.novo_trial) {
+          alert('Bem-vindo! Seu teste GRATIS de 7 dias foi ativado.\nAproveite o Agente de Compras sem custo ate o fim do periodo.');
+        }
+        return true;
       }
-      return { ok: false, motivo: data.motivo || ("HTTP " + resp.status) };
-    } catch (err) {
-      return { ok: false, motivo: "Falha de conexão: " + err.message };
-    }
+      alert(mensagemBloqueio(lic));
+      return false;
+    });
   }
 
-  function obterChaveLicenca() {
-    let chave = localStorage.getItem("agente_chave_licenca");
-    if (!chave) {
-      chave = prompt("Digite sua chave de licença do Agente de Compras:");
-      if (chave) localStorage.setItem("agente_chave_licenca", chave.trim());
-    }
-    return chave ? chave.trim() : null;
-  }
-  /* =================================================================== */
-
-  const POOL = 8;
   const DIAS_GIRO = 120;
   const DIAS_CORTE_ENTRADA = 365;
   const JANELA_VENDAS = 400;
@@ -307,16 +339,10 @@
   }
 
   async function abrirDialogo() {
-    setBtn('⏳ Validando licença...');
-    const chave = obterChaveLicenca();
-    const lic = await validarLicenca(chave);
-    setBtn('🛒 Agente de Compras');
-    if (!lic.ok) {
-      localStorage.removeItem("agente_licenca_cache");
-      alert("Licença inválida ou expirada.\nMotivo: " + (lic.motivo || "desconhecido") +
-            "\n\nPara comprar/renovar, acesse a página do produto na Hotmart.");
-      return;
-    }
+    // ----- Verificacao de licenca (email + trial 7d) -----
+    var __liberado = await checarAcesso();
+    if (!__liberado) return;
+
 
     const nome = prompt('Nome do fornecedor:');
     if (!nome) return;

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Varejo Fácil - Agente de Compras
 // @namespace    emporiodoreal
-// @version      5.1
+// @version      5.2
 // @description  Sugestão de compra cruzando entradas x vendas + validação de licença (Supabase)
 // @match        https://emporiodoreal.varejofacil.com/app/*
 // @grant        GM_xmlhttpRequest
@@ -14,6 +14,7 @@
 
 (function () {
   'use strict';
+  var POOL = 8; // paralelismo (lotes)
 
   // ===== Licenca por E-MAIL + Trial 7 dias (v5.0) =====
   var AGENTE_EMAIL_KEY = 'agente_email_licenca';
@@ -93,8 +94,7 @@
   const DIAS_GIRO = 120;
   const DIAS_CORTE_ENTRADA = 365;
   const JANELA_VENDAS = 400;
-  const POOL = 8;
-
+  
   function apiGet(url) {
     return new Promise((resolve, reject) => {
       GM_xmlhttpRequest({

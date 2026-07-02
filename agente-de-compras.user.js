@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Varejo Fácil - Agente de Compras
 // @namespace    emporiodoreal
-// @version      5.3
+// @version      5.4
 // @description  Sugestão de compra cruzando entradas x vendas + validação de licença (Supabase)
 // @match        https://*.varejofacil.com/app/*
 // @grant        GM_xmlhttpRequest
@@ -362,17 +362,31 @@
       } else { forn = arr[0]; }
     } catch (e) { alert('Erro ao buscar fornecedor: ' + e); return; }
 
-    const opcLoja = prompt(
-      'Loja:\n1 = Empório do Real\n5 = Um Mundo de Variedades\nA = Ambas (consolidado)\n\nDigite 1, 5 ou A:',
-      'A'
-    );
-    if (!opcLoja) return;
-    let lojaFiltro, sufixo;
-    const o = opcLoja.trim().toUpperCase();
-    if (o === 'A') { lojaFiltro = 'lojaId=in=(1,5)'; sufixo = 'Ambas'; }
-    else if (o === '1') { lojaFiltro = 'lojaId==1'; sufixo = 'Emporio'; }
-    else if (o === '5') { lojaFiltro = 'lojaId==5'; sufixo = 'UmMundo'; }
-    else { alert('Opção inválida.'); return; }
+    let lojas = [];
+        try {
+                const rl = await apiGet('/api/v1/pessoa/lojas?count=200');
+                lojas = (rl.items || []).map(function (x) { return { id: x.id, nome: x.nome || ('Loja ' + x.id), sigla: x.sigla || '' }; });
+        } catch (e) { alert('Erro ao buscar lojas: ' + e); return; }
+        if (!lojas.length) { alert('Nenhuma loja encontrada nesta conta.'); return; }
+        let lojaFiltro, sufixo;
+        if (lojas.length === 1) {
+                lojaFiltro = 'lojaId==' + lojas[0].id;
+                sufixo = lojas[0].sigla || lojas[0].nome;
+        } else {
+                const opcoesLoja = lojas.map(function (l, i) { return (i + 1) + ') ' + l.nome + (l.sigla ? ' (' + l.sigla + ')' : ''); }).join('\n');
+                const escL = prompt('Selecione a loja:\n' + opcoesLoja + '\nA) Todas (consolidado)\n\nDigite o numero ou A:', 'A');
+                if (!escL) return;
+                const oL = escL.trim().toUpperCase();
+                if (oL === 'A') {
+                          lojaFiltro = 'lojaId=in=(' + lojas.map(function (l) { return l.id; }).join(',') + ')';
+                          sufixo = 'Todas';
+                } else {
+                          const ixL = parseInt(oL, 10) - 1;
+                          if (isNaN(ixL) || !lojas[ixL]) { alert('Opcao invalida.'); return; }
+                          lojaFiltro = 'lojaId==' + lojas[ixL].id;
+                          sufixo = lojas[ixL].sigla || lojas[ixL].nome;
+                }
+        }
 
     const btn = document.getElementById('vf-agente-btn');
     btn.disabled = true;

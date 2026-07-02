@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         Varejo Fácil - Agente de Compras
 // @namespace    emporiodoreal
-// @version      5.2
+// @version      5.3
 // @description  Sugestão de compra cruzando entradas x vendas + validação de licença (Supabase)
-// @match        https://emporiodoreal.varejofacil.com/app/*
+// @match        https://*.varejofacil.com/app/*
 // @grant        GM_xmlhttpRequest
-// @connect      emporiodoreal.varejofacil.com
+// @connect      *.varejofacil.com
 // @connect      pjmyejohyzcfhawspceq.supabase.co
 // @require      https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js
 // @updateURL    https://raw.githubusercontent.com/aliamiri186/agente-de-compras/main/agente-de-compras.user.js

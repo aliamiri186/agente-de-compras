@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Varejo Fácil - Agente de Compras
 // @namespace    emporiodoreal
-// @version      5.4
+// @version      5.5
 // @description  Sugestão de compra cruzando entradas x vendas + validação de licença (Supabase)
 // @match        https://*.varejofacil.com/app/*
 // @grant        GM_xmlhttpRequest
@@ -14,7 +14,7 @@
 
 (function () {
   'use strict';
-  var POOL = 8; // paralelismo (lotes)
+  var POOL =12; // paralelismo (lotes)
 
   // ===== Licenca por E-MAIL + Trial 7 dias (v5.0) =====
   var AGENTE_EMAIL_KEY = 'agente_email_licenca';
@@ -365,8 +365,7 @@
     let lojas = [];
         try {
                 const rl = await apiGet('/api/v1/pessoa/lojas?count=200');
-                lojas = (rl.items || []).map(function (x) { return { id: x.id, nome: x.nome || ('Loja ' + x.id), sigla: x.sigla || '' }; });
-        } catch (e) { alert('Erro ao buscar lojas: ' + e); return; }
+                lojas = (rl.items || []).filter(function (x) { return x.ativo === true; }).map(function (x) { return { id: x.id, nome: x.nome || ('Loja ' + x.id), sigla: x.sigla || '' }; });        } catch (e) { alert('Erro ao buscar lojas: ' + e); return; }
         if (!lojas.length) { alert('Nenhuma loja encontrada nesta conta.'); return; }
         let lojaFiltro, sufixo;
         if (lojas.length === 1) {

@@ -93,6 +93,7 @@
   const DIAS_GIRO = 120;
   const DIAS_CORTE_ENTRADA = 365;
   const JANELA_VENDAS = 400;
+  const POOL = 8;
 
   function apiGet(url) {
     return new Promise((resolve, reject) => {

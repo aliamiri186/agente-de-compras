@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Varejo Fácil - Agente de Compras
 // @namespace    emporiodoreal
-// @version      5.6
+// @version      5.7
 // @description  Sugestão de compra cruzando entradas x vendas + validação de licença (Supabase)
 // @match        https://*.varejofacil.com/app/*
 // @grant        GM_xmlhttpRequest
@@ -265,6 +265,13 @@
         sugUnid = caixas * caixa;
       }
 
+      // ===== Regra (v5.7): baixíssimo giro + sem compra há >6 meses => sem sugestão, só alerta =====
+      const idadeEntCalc = diasDesde(p.ultEnt);
+      let semSugestao = false;
+      if (idadeEntCalc > 180 && classe === 'Giro baixo') {
+        caixas = 0; sugUnid = 0; semSugestao = true;
+      }
+
       let semaforo;
       if (estEstimado != null && vDia > 0) {
         const cob = estEstimado / vDia;
@@ -282,6 +289,7 @@
       if (v4 === 0) alertas.push('🟠 parado (sem venda 4m)');
       if (estEstimado != null && estEstimado < 0) alertas.push('⚠️ estimado negativo');
       if (truncado) alertas.push('⏳ estimativa indisponível (giro alto)');
+      if (semSugestao) alertas.push('🔵 baixíssimo giro >6m sem compra — revisar (sem sugestão)');
 
       let pctVend = '';
       if (p.totalEntrada > 0) {
@@ -290,6 +298,14 @@
       }
 
       return {
+        _pid: pid,
+        _caixa: caixa,
+        _caixas: caixas || 0,
+        _sugUnid: sugUnid || 0,
+        _semSugestao: semSugestao,
+        _nome: nomeProduto(pid),
+        _classe: classe,
+        _sinal: semaforo,
         _urg: semaforo === '🔴' ? 0 : (semaforo === '🟡' ? 1 : 2),
         _v4: v4,
         linha: {
@@ -314,7 +330,94 @@
     }, POOL, 'Calculando');
 
     linhas.sort((a, b) => a._urg - b._urg || b._v4 - a._v4);
-    return linhas.map(l => l.linha);
+    return linhas;
+  }
+
+  // ===== Tela interativa de confirmacao (v5.7) =====
+  function mostrarTabela(linhas, nomeForn, sufixo) {
+    const old = document.getElementById("vf-agente-modal");
+    if (old) old.remove();
+    const overlay = document.createElement("div");
+    overlay.id = "vf-agente-modal";
+    Object.assign(overlay.style, { position: "fixed", top: "0", left: "0", width: "100%", height: "100%", background: "rgba(0,0,0,.5)", zIndex: "100000", display: "flex", alignItems: "center", justifyContent: "center" });
+    const box = document.createElement("div");
+    Object.assign(box.style, { background: "#fff", width: "92%", height: "88%", borderRadius: "8px", display: "flex", flexDirection: "column", overflow: "hidden", boxShadow: "0 4px 24px rgba(0,0,0,.4)" });
+    const header = document.createElement("div");
+    Object.assign(header.style, { padding: "12px 16px", background: "#2e7d32", color: "#fff", display: "flex", alignItems: "center", gap: "12px" });
+    const title = document.createElement("div"); title.innerHTML = "<b>Sugestao de Compra - " + nomeForn + "</b>"; title.style.flex = "1";
+    const contador = document.createElement("span"); contador.id = "vf-contador"; contador.style.fontSize = "13px";
+    const btnPedido = document.createElement("button"); btnPedido.textContent = "Gerar Pedido (Excel)";
+    Object.assign(btnPedido.style, { background: "#fff", color: "#2e7d32", border: "none", borderRadius: "6px", padding: "8px 14px", fontWeight: "bold", cursor: "pointer" });
+    const btnFull = document.createElement("button"); btnFull.textContent = "Baixar analise completa";
+    Object.assign(btnFull.style, { background: "#1b5e20", color: "#fff", border: "none", borderRadius: "6px", padding: "8px 14px", cursor: "pointer" });
+    const btnFechar = document.createElement("button"); btnFechar.textContent = "Fechar";
+    Object.assign(btnFechar.style, { background: "#c62828", color: "#fff", border: "none", borderRadius: "6px", padding: "8px 14px", cursor: "pointer" });
+    header.appendChild(title); header.appendChild(contador); header.appendChild(btnPedido); header.appendChild(btnFull); header.appendChild(btnFechar);
+    const scroll = document.createElement("div");
+    Object.assign(scroll.style, { flex: "1", overflow: "auto" });
+    const table = document.createElement("table");
+    Object.assign(table.style, { width: "100%", borderCollapse: "collapse", fontSize: "13px", fontFamily: "Arial, sans-serif" });
+    const thStyle = "padding:6px;border:1px solid #ddd;";
+    table.innerHTML = "<thead><tr style=\"position:sticky;top:0;background:#eee;\">" +
+      "<th style=\"" + thStyle + "\">OK</th><th style=\"" + thStyle + "\">Sinal</th>" +
+      "<th style=\"" + thStyle + "text-align:left;\">Produto</th><th style=\"" + thStyle + "\">Classe</th>" +
+      "<th style=\"" + thStyle + "\">Cx (un)</th><th style=\"" + thStyle + "\">Sug. Cx</th>" +
+      "<th style=\"" + thStyle + "\">Sug. Un</th><th style=\"" + thStyle + "text-align:left;\">Alertas</th></tr></thead>";
+    const tbody = document.createElement("tbody"); table.appendChild(tbody);
+    const estados = [];
+    function atualizarContador() { const n = estados.filter(function (e) { return e.confirmado; }).length; contador.textContent = n + " item(ns) confirmado(s)"; }
+    linhas.forEach(function (obj) {
+      const L = obj.linha;
+      const est = { confirmado: false, cx: obj._caixas || 0, caixaUn: obj._caixa || 1, pid: obj._pid, nome: obj._nome };
+      estados.push(est);
+      const tr = document.createElement("tr"); tr.style.borderBottom = "1px solid #eee";
+      const tdOk = document.createElement("td"); tdOk.style.cssText = "padding:6px;border:1px solid #ddd;text-align:center;";
+      const bC = document.createElement("button"); bC.textContent = "Confirmar";
+      Object.assign(bC.style, { border: "none", borderRadius: "5px", padding: "5px 10px", cursor: "pointer", background: "#ddd", color: "#333", fontWeight: "bold" });
+      if (obj._semSugestao) { bC.disabled = true; bC.textContent = "Revisar"; bC.style.background = "#eee"; bC.style.color = "#999"; bC.style.cursor = "not-allowed"; }
+      bC.onclick = function () {
+        est.confirmado = !est.confirmado;
+        if (est.confirmado) { bC.style.background = "#2e7d32"; bC.style.color = "#fff"; bC.textContent = "Confirmado"; tr.style.background = "#e8f5e9"; }
+        else { bC.style.background = "#ddd"; bC.style.color = "#333"; bC.textContent = "Confirmar"; tr.style.background = ""; }
+        atualizarContador();
+      };
+      tdOk.appendChild(bC);
+      const tdSinal = document.createElement("td"); tdSinal.style.cssText = "padding:6px;border:1px solid #ddd;text-align:center;"; tdSinal.textContent = obj._sinal || "";
+      const tdProd = document.createElement("td"); tdProd.style.cssText = "padding:6px;border:1px solid #ddd;"; tdProd.textContent = obj._nome || "";
+      const tdClasse = document.createElement("td"); tdClasse.style.cssText = "padding:6px;border:1px solid #ddd;text-align:center;"; tdClasse.textContent = obj._classe || "";
+      const tdCaixa = document.createElement("td"); tdCaixa.style.cssText = "padding:6px;border:1px solid #ddd;text-align:center;"; tdCaixa.textContent = obj._caixa || "";
+      const tdCx = document.createElement("td"); tdCx.style.cssText = "padding:6px;border:1px solid #ddd;text-align:center;";
+      const inCx = document.createElement("input"); inCx.type = "number"; inCx.min = "0"; inCx.value = est.cx; inCx.style.width = "60px";
+      const tdUn = document.createElement("td"); tdUn.style.cssText = "padding:6px;border:1px solid #ddd;text-align:center;";
+      const spanUn = document.createElement("span"); spanUn.textContent = (est.cx * est.caixaUn) || 0;
+      inCx.oninput = function () { est.cx = parseInt(inCx.value, 10) || 0; spanUn.textContent = est.cx * est.caixaUn; };
+      tdCx.appendChild(inCx); tdUn.appendChild(spanUn);
+      const tdAlert = document.createElement("td"); tdAlert.style.cssText = "padding:6px;border:1px solid #ddd;font-size:12px;"; tdAlert.textContent = L["Alertas"] || "";
+      tr.appendChild(tdOk); tr.appendChild(tdSinal); tr.appendChild(tdProd); tr.appendChild(tdClasse); tr.appendChild(tdCaixa); tr.appendChild(tdCx); tr.appendChild(tdUn); tr.appendChild(tdAlert);
+      tbody.appendChild(tr);
+    });
+    scroll.appendChild(table); box.appendChild(header); box.appendChild(scroll); overlay.appendChild(box); document.body.appendChild(overlay);
+    atualizarContador();
+    btnFechar.onclick = function () { overlay.remove(); };
+    btnFull.onclick = function () { exportarExcel(linhas.map(function (o) { return o.linha; }), "AgenteCompras_" + nomeForn.replace(/\W+/g, "") + "_" + sufixo + ".xlsx"); };
+    btnPedido.onclick = function () {
+      const conf = estados.filter(function (e) { return e.confirmado && e.cx > 0; });
+      if (!conf.length) { alert("Nenhum item confirmado (com quantidade > 0)."); return; }
+      const pedido = conf.map(function (e) { return { "Cod. Barras": String(e.pid), "Produto": e.nome, "Qtd Caixas": e.cx, "Qtd Unidades": e.cx * e.caixaUn }; });
+      exportarPedido(pedido, "Pedido_" + nomeForn.replace(/\W+/g, "") + "_" + sufixo + ".xlsx");
+    };
+  }
+  function exportarPedido(itens, nomeArq) {
+    const ws = XLSX.utils.json_to_sheet(itens);
+    const range = XLSX.utils.decode_range(ws["!ref"]);
+    for (let R = range.s.r + 1; R <= range.e.r; R++) {
+      const ref = XLSX.utils.encode_cell({ r: R, c: 0 });
+      const cell = ws[ref];
+      if (cell && cell.v != null) { cell.t = "s"; cell.v = String(cell.v); cell.z = "@"; delete cell.w; }
+    }
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Pedido");
+    XLSX.writeFile(wb, nomeArq);
   }
 
   function exportarExcel(linhas, nomeArq) {
@@ -410,7 +513,7 @@
     try {
       const linhas = await rodarAgente(forn.id, lojaFiltro);
       if (linhas && linhas.length) {
-        exportarExcel(linhas, `AgenteCompras_${(forn.nome || nome).replace(/W+/g, '')}_${sufixo}.xlsx`);
+        mostrarTabela(linhas, (forn.nome || nome), sufixo);
       }
     } catch (e) {
       alert('Erro ao rodar o agente: ' + e);

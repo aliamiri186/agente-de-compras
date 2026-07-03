@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Varejo Fácil - Agente de Compras
 // @namespace    emporiodoreal
-// @version      5.5
+// @version      5.6
 // @description  Sugestão de compra cruzando entradas x vendas + validação de licença (Supabase)
 // @match        https://*.varejofacil.com/app/*
 // @grant        GM_xmlhttpRequest
@@ -212,24 +212,42 @@
     const dJanela = new Date(Date.now() - JANELA_VENDAS * 86400000).toISOString().slice(0, 10);
     const dt4m = new Date(Date.now() - DIAS_GIRO * 86400000).toISOString().slice(0, 10);
 
-    const linhas = await emLotes(ids, async (pid) => {
-      const p = prod[pid];
-      const caixa = Math.max(1, mdcLista(p.qtds));
-      let vHist = 0, v4 = 0, truncado = false;
-      try {
-        const pg = await apiGet(`/api/v1/venda/cupons-fiscais?q=itensVenda.produtoId==${pid};${lojaFiltro};data=ge=${dJanela}&count=500`);
-        (pg.items || []).forEach(c => {
+    // ===== Vendas em LOTE (v5.6): busca todos os produtos de uma vez, com paginacao =====
+    setBtn('\u23f3 Vendas...');
+    const vendasMap = {};
+    ids.forEach(function (pid) { vendasMap[pid] = { vHist: 0, v4: 0 }; });
+    const CHUNK_VENDAS = 50;
+    for (let i = 0; i < ids.length; i += CHUNK_VENDAS) {
+      const chunk = ids.slice(i, i + CHUNK_VENDAS);
+      const setChunk = new Set(chunk);
+      let start = 0;
+      for (;;) {
+        let pg;
+        try {
+          pg = await apiGet(`/api/v1/venda/cupons-fiscais?q=itensVenda.produtoId=in=(${chunk.join(',')});${lojaFiltro};data=ge=${dJanela}&count=500&start=${start}`);
+        } catch (e) { break; }
+        const items = pg.items || [];
+        items.forEach(function (c) {
           const d = c.data;
-          (c.itensVenda || []).forEach(iv => {
-            if (iv.produtoId === pid) {
+          (c.itensVenda || []).forEach(function (iv) {
+            if (setChunk.has(iv.produtoId) && vendasMap[iv.produtoId]) {
               const q = iv.quantidadeVenda || 0;
-              vHist += q;
-              if (d && d >= dt4m) v4 += q;
+              vendasMap[iv.produtoId].vHist += q;
+              if (d && d >= dt4m) vendasMap[iv.produtoId].v4 += q;
             }
           });
         });
-        truncado = (pg.total > 500);
-      } catch (e) {}
+        start += 500;
+        if (start >= (pg.total || 0)) break;
+      }
+      setBtn('\u23f3 Vendas ' + Math.min(i + CHUNK_VENDAS, ids.length) + '/' + ids.length);
+    }
+
+    const linhas = await emLotes(ids, async (pid) => {
+      const p = prod[pid];
+      const caixa = Math.max(1, mdcLista(p.qtds));
+      const vm = vendasMap[pid] || { vHist: 0, v4: 0 };
+      let vHist = vm.vHist, v4 = vm.v4, truncado = false;
 
       const saldoSys = saldoMap[pid] != null ? saldoMap[pid] : '';
       const estEstimado = truncado ? null : (p.totalEntrada - vHist);

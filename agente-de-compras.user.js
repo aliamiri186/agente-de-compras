@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Varejo Fácil - Agente de Compras
 // @namespace    emporiodoreal
-// @version      5.7
+// @version      5.8
 // @description  Sugestão de compra cruzando entradas x vendas + validação de licença (Supabase)
 // @match        https://*.varejofacil.com/app/*
 // @grant        GM_xmlhttpRequest
@@ -212,10 +212,16 @@
     const dJanela = new Date(Date.now() - JANELA_VENDAS * 86400000).toISOString().slice(0, 10);
     const dt4m = new Date(Date.now() - DIAS_GIRO * 86400000).toISOString().slice(0, 10);
 
+    // ===== Meses (v5.8): ultimos 4 meses calendario, mais recente primeiro =====
+    const mesesKeys = [];
+    const mesesLabels = [];
+    const __nomesMes = ['jan','fev','mar','abr','mai','jun','jul','ago','set','out','nov','dez'];
+    { const dref = new Date(); for (let k = 0; k < 4; k++) { const dd = new Date(dref.getFullYear(), dref.getMonth() - k, 1); mesesKeys.push(dd.getFullYear() + "-" + String(dd.getMonth() + 1).padStart(2, "0")); mesesLabels.push(__nomesMes[dd.getMonth()] + "/" + String(dd.getFullYear()).slice(2)); } }
+
     // ===== Vendas em LOTE (v5.6): busca todos os produtos de uma vez, com paginacao =====
     setBtn('\u23f3 Vendas...');
     const vendasMap = {};
-    ids.forEach(function (pid) { vendasMap[pid] = { vHist: 0, v4: 0 }; });
+    ids.forEach(function (pid) { vendasMap[pid] = { vHist: 0, v4: 0, meses: {} }; });
     const CHUNK_VENDAS = 50;
     for (let i = 0; i < ids.length; i += CHUNK_VENDAS) {
       const chunk = ids.slice(i, i + CHUNK_VENDAS);
@@ -234,6 +240,7 @@
               const q = iv.quantidadeVenda || 0;
               vendasMap[iv.produtoId].vHist += q;
               if (d && d >= dt4m) vendasMap[iv.produtoId].v4 += q;
+              if (d) { const ym = d.slice(0, 7); vendasMap[iv.produtoId].meses[ym] = (vendasMap[iv.produtoId].meses[ym] || 0) + q; }
             }
           });
         });
@@ -246,7 +253,7 @@
     const linhas = await emLotes(ids, async (pid) => {
       const p = prod[pid];
       const caixa = Math.max(1, mdcLista(p.qtds));
-      const vm = vendasMap[pid] || { vHist: 0, v4: 0 };
+      const vm = vendasMap[pid] || { vHist: 0, v4: 0, meses: {} };
       let vHist = vm.vHist, v4 = vm.v4, truncado = false;
 
       const saldoSys = saldoMap[pid] != null ? saldoMap[pid] : '';
@@ -298,6 +305,10 @@
       }
 
       return {
+        _meses: mesesKeys.map(function (k) { return (vm.meses && vm.meses[k]) || 0; }),
+        _mesesLabels: mesesLabels,
+        _ultEnt: p.ultEnt ? p.ultEnt.slice(0, 10) : '',
+        _qtdUltEnt: p.qtdUltEnt,
         _pid: pid,
         _caixa: caixa,
         _caixas: caixas || 0,
@@ -362,7 +373,7 @@
       "<th style=\"" + thStyle + "\">OK</th><th style=\"" + thStyle + "\">Sinal</th>" +
       "<th style=\"" + thStyle + "text-align:left;\">Produto</th><th style=\"" + thStyle + "\">Classe</th>" +
       "<th style=\"" + thStyle + "\">Cx (un)</th><th style=\"" + thStyle + "\">Sug. Cx</th>" +
-      "<th style=\"" + thStyle + "\">Sug. Un</th><th style=\"" + thStyle + "text-align:left;\">Alertas</th></tr></thead>";
+      "<th style=\"" + thStyle + "\">Sug. Un</th>" + ((linhas[0] && linhas[0]._mesesLabels) || ["M-1","M-2","M-3","M-4"]).map(function (ml) { return "<th style=\"" + thStyle + "\">" + ml + "</th>"; }).join("") + "<th style=\"" + thStyle + "\">Ult. entrada</th><th style=\"" + thStyle + "\">Qtd ult. ent.</th><th style=\"" + thStyle + "text-align:left;\">Alertas</th></tr></thead>";
     const tbody = document.createElement("tbody"); table.appendChild(tbody);
     const estados = [];
     function atualizarContador() { const n = estados.filter(function (e) { return e.confirmado; }).length; contador.textContent = n + " item(ns) confirmado(s)"; }
@@ -392,8 +403,12 @@
       const spanUn = document.createElement("span"); spanUn.textContent = (est.cx * est.caixaUn) || 0;
       inCx.oninput = function () { est.cx = parseInt(inCx.value, 10) || 0; spanUn.textContent = est.cx * est.caixaUn; };
       tdCx.appendChild(inCx); tdUn.appendChild(spanUn);
+      const mesesVals = obj._meses || [0,0,0,0];
+      const tdM = mesesVals.map(function (mv) { const td = document.createElement("td"); td.style.cssText = "padding:6px;border:1px solid #ddd;text-align:center;"; td.textContent = mv || 0; return td; });
+      const tdUlt = document.createElement("td"); tdUlt.style.cssText = "padding:6px;border:1px solid #ddd;text-align:center;"; tdUlt.textContent = obj._ultEnt || "";
+      const tdQtdUlt = document.createElement("td"); tdQtdUlt.style.cssText = "padding:6px;border:1px solid #ddd;text-align:center;"; tdQtdUlt.textContent = (obj._qtdUltEnt != null ? obj._qtdUltEnt : "");
       const tdAlert = document.createElement("td"); tdAlert.style.cssText = "padding:6px;border:1px solid #ddd;font-size:12px;"; tdAlert.textContent = L["Alertas"] || "";
-      tr.appendChild(tdOk); tr.appendChild(tdSinal); tr.appendChild(tdProd); tr.appendChild(tdClasse); tr.appendChild(tdCaixa); tr.appendChild(tdCx); tr.appendChild(tdUn); tr.appendChild(tdAlert);
+      tr.appendChild(tdOk); tr.appendChild(tdSinal); tr.appendChild(tdProd); tr.appendChild(tdClasse); tr.appendChild(tdCaixa); tr.appendChild(tdCx); tr.appendChild(tdUn); tdM.forEach(function (td) { tr.appendChild(td); }); tr.appendChild(tdUlt); tr.appendChild(tdQtdUlt); tr.appendChild(tdAlert);
       tbody.appendChild(tr);
     });
     scroll.appendChild(table); box.appendChild(header); box.appendChild(scroll); overlay.appendChild(box); document.body.appendChild(overlay);

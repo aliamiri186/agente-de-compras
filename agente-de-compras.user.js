@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Varejo Fácil - Agente de Compras
 // @namespace    emporiodoreal
-// @version      5.9
+// @version      5.10
 // @description  Sugestão de compra cruzando entradas x vendas + validação de licença (Supabase)
 // @match        https://*.varejofacil.com/app/*
 // @grant        GM_xmlhttpRequest
@@ -406,7 +406,7 @@
       const inCx = document.createElement("input"); inCx.type = "number"; inCx.min = "0"; inCx.value = est.cx; inCx.style.width = "60px";
       const tdUn = document.createElement("td"); tdUn.style.cssText = "padding:6px;border:1px solid #ddd;text-align:center;";
       const spanUn = document.createElement("span"); spanUn.textContent = (est.cx * est.caixaUn) || 0;
-      inCx.oninput = function () { est.cx = parseInt(inCx.value, 10) || 0; spanUn.textContent = est.cx * est.caixaUn; };
+      inCx.oninput = function () { est.cx = parseInt(inCx.value, 10) || 0; spanUn.textContent = est.cx * est.caixaUn; if (obj._semSugestao) { if (est.cx > 0) { bC.disabled = false; bC.style.cursor = "pointer"; if (!est.confirmado) { bC.style.background = "#ddd"; bC.style.color = "#333"; bC.textContent = "Confirmar"; } } else { bC.disabled = true; est.confirmado = false; bC.style.background = "#eee"; bC.style.color = "#999"; bC.textContent = "Revisar"; bC.style.cursor = "not-allowed"; tr.style.background = ""; atualizarContador(); } } };
       tdCx.appendChild(inCx); tdUn.appendChild(spanUn);
       const lojasRow = obj._lojas || [];
       function rotuloLoja(lj) { for (var i = 0; i < lojasRow.length; i++) { if (String(lojasRow[i].id) === String(lj)) { return lojasRow[i].sigla || lojasRow[i].nome || ('Loja ' + lj); } } return 'Loja ' + lj; }

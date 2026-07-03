@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Varejo Fácil - Agente de Compras
 // @namespace    emporiodoreal
-// @version      5.8
+// @version      5.9
 // @description  Sugestão de compra cruzando entradas x vendas + validação de licença (Supabase)
 // @match        https://*.varejofacil.com/app/*
 // @grant        GM_xmlhttpRequest
@@ -155,7 +155,7 @@
     return todas;
   }
 
-  async function rodarAgente(fornecedorId, lojaFiltro) {
+  async function rodarAgente(fornecedorId, lojaFiltro, lojas) {
     setBtn('⏳ Buscando notas...');
     const notas = await coletarEntradas(fornecedorId, lojaFiltro);
     if (!notas.length) { alert('Nenhuma nota de entrada encontrada.'); return null; }
@@ -205,7 +205,7 @@
       const chunk = ids.slice(i, i + 60);
       try {
         const r = await apiGet(`/api/v1/estoque/saldos?q=produtoId=in=(${chunk.join(',')});${lojaFiltro}&count=1000`);
-        (r.items || []).forEach(x => { saldoMap[x.produtoId] = (saldoMap[x.produtoId] || 0) + (x.saldo || 0); });
+        (r.items || []).forEach(x => { const pid = x.produtoId; if (!saldoMap[pid]) saldoMap[pid] = { total: 0, porLoja: {} }; const s = x.saldo || 0; saldoMap[pid].total += s; saldoMap[pid].porLoja[x.lojaId] = (saldoMap[pid].porLoja[x.lojaId] || 0) + s; });
       } catch (e) {}
     }
 
@@ -240,7 +240,7 @@
               const q = iv.quantidadeVenda || 0;
               vendasMap[iv.produtoId].vHist += q;
               if (d && d >= dt4m) vendasMap[iv.produtoId].v4 += q;
-              if (d) { const ym = d.slice(0, 7); vendasMap[iv.produtoId].meses[ym] = (vendasMap[iv.produtoId].meses[ym] || 0) + q; }
+              if (d) { const ym = d.slice(0, 7); const lj = c.lojaId; const mm = vendasMap[iv.produtoId].meses; if (!mm[ym]) mm[ym] = {}; mm[ym][lj] = (mm[ym][lj] || 0) + q; }
             }
           });
         });
@@ -256,7 +256,8 @@
       const vm = vendasMap[pid] || { vHist: 0, v4: 0, meses: {} };
       let vHist = vm.vHist, v4 = vm.v4, truncado = false;
 
-      const saldoSys = saldoMap[pid] != null ? saldoMap[pid] : '';
+      const saldoObj = saldoMap[pid] || { total: 0, porLoja: {} };
+      const saldoSys = saldoObj.total;
       const estEstimado = truncado ? null : (p.totalEntrada - vHist);
       const vDia = v4 / DIAS_GIRO;
 
@@ -305,7 +306,11 @@
       }
 
       return {
-        _meses: mesesKeys.map(function (k) { return (vm.meses && vm.meses[k]) || 0; }),
+        _meses: mesesKeys.map(function (k) { const o = (vm.meses && vm.meses[k]) || {}; return Object.keys(o).reduce(function (s, lj) { return s + (o[lj] || 0); }, 0); }),
+        _mesesLoja: mesesKeys.map(function (k) { return (vm.meses && vm.meses[k]) || {}; }),
+        _lojas: (lojas || []),
+        _estoqueTotal: saldoObj.total,
+        _estoquePorLoja: saldoObj.porLoja,
         _mesesLabels: mesesLabels,
         _ultEnt: p.ultEnt ? p.ultEnt.slice(0, 10) : '',
         _qtdUltEnt: p.qtdUltEnt,
@@ -373,7 +378,7 @@
       "<th style=\"" + thStyle + "\">OK</th><th style=\"" + thStyle + "\">Sinal</th>" +
       "<th style=\"" + thStyle + "text-align:left;\">Produto</th><th style=\"" + thStyle + "\">Classe</th>" +
       "<th style=\"" + thStyle + "\">Cx (un)</th><th style=\"" + thStyle + "\">Sug. Cx</th>" +
-      "<th style=\"" + thStyle + "\">Sug. Un</th>" + ((linhas[0] && linhas[0]._mesesLabels) || ["M-1","M-2","M-3","M-4"]).map(function (ml) { return "<th style=\"" + thStyle + "\">" + ml + "</th>"; }).join("") + "<th style=\"" + thStyle + "\">Ult. entrada</th><th style=\"" + thStyle + "\">Qtd ult. ent.</th><th style=\"" + thStyle + "text-align:left;\">Alertas</th></tr></thead>";
+      "<th style=\"" + thStyle + "\">Sug. Un</th>" + "<th style=\"" + thStyle + "\">Estoque atual</th>" + ((linhas[0] && linhas[0]._mesesLabels) || ["M-1","M-2","M-3","M-4"]).map(function (ml) { return "<th style=\"" + thStyle + "\">" + ml + "</th>"; }).join("") + "<th style=\"" + thStyle + "\">Ult. entrada</th><th style=\"" + thStyle + "\">Qtd ult. ent.</th><th style=\"" + thStyle + "text-align:left;\">Alertas</th></tr></thead>";
     const tbody = document.createElement("tbody"); table.appendChild(tbody);
     const estados = [];
     function atualizarContador() { const n = estados.filter(function (e) { return e.confirmado; }).length; contador.textContent = n + " item(ns) confirmado(s)"; }
@@ -403,12 +408,16 @@
       const spanUn = document.createElement("span"); spanUn.textContent = (est.cx * est.caixaUn) || 0;
       inCx.oninput = function () { est.cx = parseInt(inCx.value, 10) || 0; spanUn.textContent = est.cx * est.caixaUn; };
       tdCx.appendChild(inCx); tdUn.appendChild(spanUn);
-      const mesesVals = obj._meses || [0,0,0,0];
-      const tdM = mesesVals.map(function (mv) { const td = document.createElement("td"); td.style.cssText = "padding:6px;border:1px solid #ddd;text-align:center;"; td.textContent = mv || 0; return td; });
+      const lojasRow = obj._lojas || [];
+      function rotuloLoja(lj) { for (var i = 0; i < lojasRow.length; i++) { if (String(lojasRow[i].id) === String(lj)) { return lojasRow[i].sigla || lojasRow[i].nome || ('Loja ' + lj); } } return 'Loja ' + lj; }
+      function fmtPorLoja(mapObj) { var ordem = lojasRow.length ? lojasRow.map(function (l) { return String(l.id); }) : Object.keys(mapObj || {}); var partes = []; ordem.forEach(function (lj) { var v = (mapObj && mapObj[lj]) || 0; partes.push(rotuloLoja(lj) + ': ' + v); }); return partes; }
+      const tdEstoque = document.createElement("td"); tdEstoque.style.cssText = "padding:6px;border:1px solid #ddd;text-align:center;font-size:12px;"; { var totEst = obj._estoqueTotal || 0; var linhasEst = fmtPorLoja(obj._estoquePorLoja); tdEstoque.innerHTML = "<b>" + totEst + "</b>" + (linhasEst.length ? "<br><span style='color:#666'>" + linhasEst.join("<br>") + "</span>" : ""); }
+      const mesesLojaVals = obj._mesesLoja || [{},{},{},{}];
+      const tdM = mesesLojaVals.map(function (mp) { const td = document.createElement("td"); td.style.cssText = "padding:6px;border:1px solid #ddd;text-align:center;font-size:12px;"; var tot = Object.keys(mp || {}).reduce(function (s, lj) { return s + (mp[lj] || 0); }, 0); var det = fmtPorLoja(mp); td.innerHTML = "<b>" + tot + "</b>" + (det.length ? "<br><span style='color:#666'>" + det.join("<br>") + "</span>" : ""); return td; });
       const tdUlt = document.createElement("td"); tdUlt.style.cssText = "padding:6px;border:1px solid #ddd;text-align:center;"; tdUlt.textContent = obj._ultEnt || "";
       const tdQtdUlt = document.createElement("td"); tdQtdUlt.style.cssText = "padding:6px;border:1px solid #ddd;text-align:center;"; tdQtdUlt.textContent = (obj._qtdUltEnt != null ? obj._qtdUltEnt : "");
       const tdAlert = document.createElement("td"); tdAlert.style.cssText = "padding:6px;border:1px solid #ddd;font-size:12px;"; tdAlert.textContent = L["Alertas"] || "";
-      tr.appendChild(tdOk); tr.appendChild(tdSinal); tr.appendChild(tdProd); tr.appendChild(tdClasse); tr.appendChild(tdCaixa); tr.appendChild(tdCx); tr.appendChild(tdUn); tdM.forEach(function (td) { tr.appendChild(td); }); tr.appendChild(tdUlt); tr.appendChild(tdQtdUlt); tr.appendChild(tdAlert);
+      tr.appendChild(tdOk); tr.appendChild(tdSinal); tr.appendChild(tdProd); tr.appendChild(tdClasse); tr.appendChild(tdCaixa); tr.appendChild(tdCx); tr.appendChild(tdUn); tr.appendChild(tdEstoque); tdM.forEach(function (td) { tr.appendChild(td); }); tr.appendChild(tdUlt); tr.appendChild(tdQtdUlt); tr.appendChild(tdAlert);
       tbody.appendChild(tr);
     });
     scroll.appendChild(table); box.appendChild(header); box.appendChild(scroll); overlay.appendChild(box); document.body.appendChild(overlay);
@@ -526,7 +535,7 @@
     const btn = document.getElementById('vf-agente-btn');
     btn.disabled = true;
     try {
-      const linhas = await rodarAgente(forn.id, lojaFiltro);
+      const linhas = await rodarAgente(forn.id, lojaFiltro, lojas);
       if (linhas && linhas.length) {
         mostrarTabela(linhas, (forn.nome || nome), sufixo);
       }

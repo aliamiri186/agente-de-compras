@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Varejo Fácil - Agente de Compras
 // @namespace    emporiodoreal
-// @version      5.12
+// @version      5.13
 // @description  Sugestão de compra cruzando entradas x vendas + validação de licença (Supabase)
 // @match        https://*.varejofacil.com/app/*
 // @grant        GM_xmlhttpRequest
@@ -254,7 +254,7 @@
                         const p = prod[pid];
                         const caixa = Math.max(1, mdcLista(p.qtds));
                         const vm = vendasMap[pid] || { vHist: 0, v4: 0, meses: {} };
-                        let vHist = vm.vHist, v4 = vm.v4, truncado = false;
+                        let vHist = vm.vHist, v4 = vm.v4, truncado = false; var antes4m = ''; { var __ini = mesesKeys[3]; var __entM = p.ultEnt ? p.ultEnt.slice(0,7) : null; if (__entM && __entM < __ini && vm.meses) { var __s = 0; Object.keys(vm.meses).forEach(function(ym){ if (ym < __ini && ym >= __entM) { var mm = vm.meses[ym]; __s += Object.keys(mm).reduce(function(a,lj){return a+(mm[lj]||0);},0); } }); antes4m = __s; } }
 
                         const saldoObj = saldoMap[pid] || { total: 0, porLoja: {} };
                         const saldoSys = saldoObj.total;
@@ -271,7 +271,7 @@
                         else { classe = 'Giro baixo'; alvo = 90; }
 
                         // v5.11: a sugestao desconta o estoque atual da meta de cobertura (nao sugere so por ter tido 1 venda)
-                        const estoqueBase = estEstimado != null ? estEstimado : saldoSys;
+                        const estoqueBase = Math.min(saldoSys, estEstimado != null ? estEstimado : saldoSys);
                         const necessidadeUnid = (vDia * alvo) - estoqueBase;
                         let caixas = 0, sugUnid = 0;
                         if (v4 > 0 && necessidadeUnid > 0) {
@@ -339,7 +339,7 @@
         _classe: classe,
         _sinal: semaforo,
         _urg: semaforo === '🔴' ? 0 : (semaforo === '🟡' ? 1 : 2),
-        _v4: v4,
+        _v4: v4, _antes4m: antes4m,
         linha: {
           'Sinal': semaforo,
           'Produto': nomeProduto(pid),
@@ -351,7 +351,7 @@
           'Estoque Real (sistema)': saldoSys,
           'Total Comprado (hist.)': p.totalEntrada,
           'Vendido (13m)': vHist,
-          'Vendido (4m)': v4,
+          'Vendido (4m)': v4, 'Vendido antes 4m (desde ult.ent)': antes4m,
           '% Vendido': pctVend,
           'Últ. entrada': p.ultEnt ? p.ultEnt.slice(0, 10) : '',
           'Qtd últ. entrada': p.qtdUltEnt,
@@ -394,7 +394,7 @@
       "<th style=\"" + thStyle + "\">OK</th><th style=\"" + thStyle + "\">Sinal</th>" +
       "<th style=\"" + thStyle + "text-align:left;\">Produto</th><th style=\"" + thStyle + "\">Classe</th>" +
       "<th style=\"" + thStyle + "\">Cx (un)</th><th style=\"" + thStyle + "\">Sug. Cx</th>" +
-      "<th style=\"" + thStyle + "\">Sug. Un</th>" + "<th style=\"" + thStyle + "\">Estoque atual</th>" + ((linhas[0] && linhas[0]._mesesLabels) || ["M-1","M-2","M-3","M-4"]).map(function (ml) { return "<th style=\"" + thStyle + "\">" + ml + "</th>"; }).join("") + "<th style=\"" + thStyle + "\">Ult. entrada</th><th style=\"" + thStyle + "\">Qtd ult. ent.</th><th style=\"" + thStyle + "text-align:left;\">Alertas</th></tr></thead>";
+      "<th style=\"" + thStyle + "\">Sug. Un</th>" + "<th style=\"" + thStyle + "\">Estoque atual</th>" + ((linhas[0] && linhas[0]._mesesLabels) || ["M-1","M-2","M-3","M-4"]).map(function (ml) { return "<th style=\"" + thStyle + "\">" + ml + "</th>"; }).join("") + "<th style=\"" + thStyle + "\">Vendido antes 4m</th><th style=\"" + thStyle + "\">Ult. entrada</th><th style=\"" + thStyle + "\">Qtd ult. ent.</th><th style=\"" + thStyle + "text-align:left;\">Alertas</th></tr></thead>";
     const tbody = document.createElement("tbody"); table.appendChild(tbody);
     const estados = [];
     function atualizarContador() { const n = estados.filter(function (e) { return e.confirmado; }).length; contador.textContent = n + " item(ns) confirmado(s)"; }
@@ -430,10 +430,10 @@
       const tdEstoque = document.createElement("td"); tdEstoque.style.cssText = "padding:6px;border:1px solid #ddd;text-align:center;font-size:12px;"; { var totEst = obj._estoqueTotal || 0; var linhasEst = fmtPorLoja(obj._estoquePorLoja); tdEstoque.innerHTML = "<b>" + totEst + "</b>" + (linhasEst.length ? "<br><span style='color:#666'>" + linhasEst.join("<br>") + "</span>" : ""); }
       const mesesLojaVals = obj._mesesLoja || [{},{},{},{}];
       const tdM = mesesLojaVals.map(function (mp) { const td = document.createElement("td"); td.style.cssText = "padding:6px;border:1px solid #ddd;text-align:center;font-size:12px;"; var tot = Object.keys(mp || {}).reduce(function (s, lj) { return s + (mp[lj] || 0); }, 0); var det = fmtPorLoja(mp); td.innerHTML = "<b>" + tot + "</b>" + (det.length ? "<br><span style='color:#666'>" + det.join("<br>") + "</span>" : ""); return td; });
-      const tdUlt = document.createElement("td"); tdUlt.style.cssText = "padding:6px;border:1px solid #ddd;text-align:center;"; tdUlt.textContent = obj._ultEnt || "";
+      const tdAntes = document.createElement("td"); tdAntes.style.cssText = "padding:6px;border:1px solid #ddd;text-align:center;"; tdAntes.textContent = (obj._antes4m === "" || obj._antes4m == null) ? "" : obj._antes4m; const tdUlt = document.createElement("td"); tdUlt.style.cssText = "padding:6px;border:1px solid #ddd;text-align:center;"; tdUlt.textContent = obj._ultEnt || "";
       const tdQtdUlt = document.createElement("td"); tdQtdUlt.style.cssText = "padding:6px;border:1px solid #ddd;text-align:center;"; tdQtdUlt.textContent = (obj._qtdUltEnt != null ? obj._qtdUltEnt : "");
       const tdAlert = document.createElement("td"); tdAlert.style.cssText = "padding:6px;border:1px solid #ddd;font-size:12px;"; tdAlert.textContent = L["Alertas"] || "";
-      tr.appendChild(tdOk); tr.appendChild(tdSinal); tr.appendChild(tdProd); tr.appendChild(tdClasse); tr.appendChild(tdCaixa); tr.appendChild(tdCx); tr.appendChild(tdUn); tr.appendChild(tdEstoque); tdM.forEach(function (td) { tr.appendChild(td); }); tr.appendChild(tdUlt); tr.appendChild(tdQtdUlt); tr.appendChild(tdAlert);
+      tr.appendChild(tdOk); tr.appendChild(tdSinal); tr.appendChild(tdProd); tr.appendChild(tdClasse); tr.appendChild(tdCaixa); tr.appendChild(tdCx); tr.appendChild(tdUn); tr.appendChild(tdEstoque); tdM.forEach(function (td) { tr.appendChild(td); }); tr.appendChild(tdAntes); tr.appendChild(tdUlt); tr.appendChild(tdQtdUlt); tr.appendChild(tdAlert);
       tbody.appendChild(tr);
     });
     scroll.appendChild(table); box.appendChild(header); box.appendChild(scroll); overlay.appendChild(box); document.body.appendChild(overlay);

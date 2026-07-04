@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Varejo Fácil - Agente de Compras
 // @namespace    emporiodoreal
-// @version      5.10
+// @version      5.11
 // @description  Sugestão de compra cruzando entradas x vendas + validação de licença (Supabase)
 // @match        https://*.varejofacil.com/app/*
 // @grant        GM_xmlhttpRequest
@@ -250,35 +250,50 @@
       setBtn('\u23f3 Vendas ' + Math.min(i + CHUNK_VENDAS, ids.length) + '/' + ids.length);
     }
 
-    const linhas = await emLotes(ids, async (pid) => {
-      const p = prod[pid];
-      const caixa = Math.max(1, mdcLista(p.qtds));
-      const vm = vendasMap[pid] || { vHist: 0, v4: 0, meses: {} };
-      let vHist = vm.vHist, v4 = vm.v4, truncado = false;
+            const linhas = await emLotes(ids, async (pid) => {
+                        const p = prod[pid];
+                        const caixa = Math.max(1, mdcLista(p.qtds));
+                        const vm = vendasMap[pid] || { vHist: 0, v4: 0, meses: {} };
+                        let vHist = vm.vHist, v4 = vm.v4, truncado = false;
 
-      const saldoObj = saldoMap[pid] || { total: 0, porLoja: {} };
-      const saldoSys = saldoObj.total;
-      const estEstimado = truncado ? null : (p.totalEntrada - vHist);
-      const vDia = v4 / DIAS_GIRO;
+                        const saldoObj = saldoMap[pid] || { total: 0, porLoja: {} };
+                        const saldoSys = saldoObj.total;
+                        const estEstimado = truncado ? null : (p.totalEntrada - vHist);
+                        // v5.11: giro proporcional aos dias reais em estoque (evita diluir item novo na janela fixa de 120 dias)
+                        const idadeEstoque = diasDesde(p.ultEnt);
+                        const diasBase = Math.max(1, Math.min(DIAS_GIRO, idadeEstoque === Infinity ? DIAS_GIRO : idadeEstoque));
+                        const vDia = v4 / diasBase;
 
-      let classe, alvo;
-      if (v4 === 0) { classe = 'Parado'; alvo = 0; }
-      else if (vDia >= 1) { classe = 'Alto giro'; alvo = 45; }
-      else if (vDia >= 0.3) { classe = 'Giro médio'; alvo = 60; }
-      else { classe = 'Giro baixo'; alvo = 90; }
+                        let classe, alvo;
+                        if (v4 === 0) { classe = 'Parado'; alvo = 0; }
+                        else if (vDia >= 1) { classe = 'Alto giro'; alvo = 45; }
+                        else if (vDia >= 0.3) { classe = 'Giro médio'; alvo = 60; }
+                        else { classe = 'Giro baixo'; alvo = 90; }
 
-      let caixas = 0, sugUnid = 0;
-      if (v4 > 0) {
-        caixas = Math.max(1, Math.ceil((vDia * alvo) / caixa));
-        sugUnid = caixas * caixa;
-      }
+                        // v5.11: a sugestao desconta o estoque atual da meta de cobertura (nao sugere so por ter tido 1 venda)
+                        const estoqueBase = estEstimado != null ? estEstimado : saldoSys;
+                        const necessidadeUnid = (vDia * alvo) - estoqueBase;
+                        let caixas = 0, sugUnid = 0;
+                        if (v4 > 0 && necessidadeUnid > 0) {
+                                      caixas = Math.max(1, Math.ceil(necessidadeUnid / caixa));
+                                      sugUnid = caixas * caixa;
+                        }
 
-      // ===== Regra (v5.7): baixíssimo giro + sem compra há >6 meses => sem sugestão, só alerta =====
-      const idadeEntCalc = diasDesde(p.ultEnt);
-      let semSugestao = false;
-      if (idadeEntCalc > 180 && classe === 'Giro baixo') {
-        caixas = 0; sugUnid = 0; semSugestao = true;
-      }
+                        // Regra (v5.7): baixissimo giro + sem compra ha >6 meses => sem sugestao, so alerta
+                        const idadeEntCalc = diasDesde(p.ultEnt);
+                        let semSugestao = false;
+                        if (idadeEntCalc > 180 && classe === 'Giro baixo') {
+                                      caixas = 0; sugUnid = 0; semSugestao = true;
+                        }
+
+                        // v5.11: queda abrupta de vendas no mes mais recente => revisar manualmente, sem sugestao automatica
+                        const somaMes = function (k) { const mm = (vm.meses && vm.meses[k]) || {}; return Object.keys(mm).reduce(function (s, lj) { return s + (mm[lj] || 0); }, 0); };
+                        const mesAtualQtd = somaMes(mesesKeys[0]);
+                        const mesAnteriorQtd = somaMes(mesesKeys[1]);
+                        const quedaAbrupta = mesAnteriorQtd >= 3 && mesAtualQtd === 0;
+                        if (quedaAbrupta && !semSugestao) {
+                                      caixas = 0; sugUnid = 0; semSugestao = true;
+                        }
 
       let semaforo;
       if (estEstimado != null && vDia > 0) {
@@ -297,7 +312,8 @@
       if (v4 === 0) alertas.push('🟠 parado (sem venda 4m)');
       if (estEstimado != null && estEstimado < 0) alertas.push('⚠️ estimado negativo');
       if (truncado) alertas.push('⏳ estimativa indisponível (giro alto)');
-      if (semSugestao) alertas.push('🔵 baixíssimo giro >6m sem compra — revisar (sem sugestão)');
+            if (semSugestao && !quedaAbrupta) alertas.push('🔵 baixissimo giro >6m sem compra - revisar (sem sugestao)');
+                    if (quedaAbrupta) alertas.push('🟣 queda abrupta de vendas (mes atual zerado) - revisar (sem sugestao)');
 
       let pctVend = '';
       if (p.totalEntrada > 0) {

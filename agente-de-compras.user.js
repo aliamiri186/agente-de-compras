@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Varejo Fácil - Agente de Compras
 // @namespace    emporiodoreal
-// @version      5.11
+// @version      5.12
 // @description  Sugestão de compra cruzando entradas x vendas + validação de licença (Supabase)
 // @match        https://*.varejofacil.com/app/*
 // @grant        GM_xmlhttpRequest
@@ -286,11 +286,11 @@
                                       caixas = 0; sugUnid = 0; semSugestao = true;
                         }
 
-                        // v5.11: queda abrupta de vendas no mes mais recente => revisar manualmente, sem sugestao automatica
+                        // v5.12: queda abrupta so vale apos dia 15 do mes e se ainda houver estoque (produto esgotado nao e queda, e falta)
                         const somaMes = function (k) { const mm = (vm.meses && vm.meses[k]) || {}; return Object.keys(mm).reduce(function (s, lj) { return s + (mm[lj] || 0); }, 0); };
                         const mesAtualQtd = somaMes(mesesKeys[0]);
                         const mesAnteriorQtd = somaMes(mesesKeys[1]);
-                        const quedaAbrupta = mesAnteriorQtd >= 3 && mesAtualQtd === 0;
+                        const diaDoMes = new Date().getDate(); const quedaAbrupta = mesAnteriorQtd >= 3 && mesAtualQtd === 0 && diaDoMes > 15 && estoqueBase > 0;
                         if (quedaAbrupta && !semSugestao) {
                                       caixas = 0; sugUnid = 0; semSugestao = true;
                         }

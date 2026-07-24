@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Varejo Fácil - Agente de Compras
 // @namespace    emporiodoreal
-// @version      5.13
+// @version      5.14
 // @description  Sugestão de compra cruzando entradas x vendas + validação de licença (Supabase)
 // @match        https://*.varejofacil.com/app/*
 // @grant        GM_xmlhttpRequest
@@ -534,17 +534,23 @@
                 sufixo = lojas[0].sigla || lojas[0].nome;
         } else {
                 const opcoesLoja = lojas.map(function (l, i) { return (i + 1) + ') ' + l.nome + (l.sigla ? ' (' + l.sigla + ')' : ''); }).join('\n');
-                const escL = prompt('Selecione a loja:\n' + opcoesLoja + '\nA) Todas (consolidado)\n\nDigite o numero ou A:', 'A');
+                const escL = prompt('Selecione a loja:\n' + opcoesLoja + '\nA) Todas (consolidado)\n\nDigite o numero, ou varios separados por virgula (ex: 1,3), ou A:', 'A');
                 if (!escL) return;
                 const oL = escL.trim().toUpperCase();
                 if (oL === 'A') {
                           lojaFiltro = 'lojaId=in=(' + lojas.map(function (l) { return l.id; }).join(',') + ')';
                           sufixo = 'Todas';
                 } else {
-                          const ixL = parseInt(oL, 10) - 1;
-                          if (isNaN(ixL) || !lojas[ixL]) { alert('Opcao invalida.'); return; }
-                          lojaFiltro = 'lojaId==' + lojas[ixL].id;
-                          sufixo = lojas[ixL].sigla || lojas[ixL].nome;
+                          const nums = oL.split(',').map(function (n) { return parseInt(n.trim(), 10) - 1; });
+                          if (nums.some(function (ix) { return isNaN(ix) || !lojas[ix]; })) { alert('Opcao invalida.'); return; }
+                          const sel = nums.map(function (ix) { return lojas[ix]; });
+                          if (sel.length === 1) {
+                              lojaFiltro = 'lojaId==' + sel[0].id;
+                              sufixo = sel[0].sigla || sel[0].nome;
+                          } else {
+                              lojaFiltro = 'lojaId=in=(' + sel.map(function (l) { return l.id; }).join(',') + ')';
+                              sufixo = sel.map(function (l) { return l.sigla || l.nome; }).join('+');
+                          }
                 }
         }
 
